@@ -3883,33 +3883,79 @@ int tracksource(DSPAM_CTX *CTX) {
  */
 
 int has_virus(buffer *message) {
-  struct sockaddr_in addr;
-  int sockfd;
+  struct addrinfo hints;
+  struct addrinfo *results, *cur_res;
+  struct sockaddr_in *addr;
+  int sockfd, ret;
   int virus = 0;
   int yes = 1;
   int port = atoi(_ds_read_attribute(agent_config, "ClamAVPort"));
-  int addr_len;
   char *host = _ds_read_attribute(agent_config, "ClamAVHost");
   FILE *sock;
   FILE *sockout;
   char buf[128];
-
-  sockfd = socket(AF_INET, SOCK_STREAM, 0);
-  if (sockfd < 0) {
-    LOG(LOG_ERR, "socket(AF_INET, SOCK_STREAM, 0): %s", strerror(errno));
-    return 0;
-  }
-  memset(&addr, 0, sizeof(struct sockaddr_in));
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = inet_addr(host);
-  addr.sin_port = htons(port);
-  addr_len = sizeof(struct sockaddr_in);
+  
   LOGDEBUG("Connecting to %s:%d for virus check", host, port);
-  if(connect(sockfd, (struct sockaddr *)&addr, addr_len)<0) {
-    LOG(LOG_ERR, ERR_CLIENT_CONNECT_HOST, host, port, strerror(errno));
-    close(sockfd);
-    return 0;
+  
+  memset(&hints, 0, sizeof(struct addrinfo));
+  hints.ai_family = AF_INET;  // Use AF_UNSPEC if we eventually want to allow IPv6
+  hints.ai_socktype = SOCK_STREAM;
+  hints.ai_flags = 0;
+  hints.ai_protocol = 0;
+  
+  LOGDEBUG(INFO_CLIENT_DNS_LOOKUP, host);
+  ret = getaddrinfo(host, NULL, &hints, &results);
+  if (ret != 0) {
+    LOG(LOG_ERR, ERR_CLIENT_DNS_LOOKUP, host, gai_strerror(ret));
+    return EFAILURE;
   }
+  
+  if (results == NULL) {
+    LOG(LOG_ERR, "DNS lookup failed for %s", host);
+    return EFAILURE;
+  }
+  
+  // results is a linked list of addrinfo structs containing (hopefully)
+  // IP address(es) return from DNS lookup.  We try connecting to each
+  // and if they all fail, we error out.
+  for (cur_res = results; cur_res != NULL; cur_res = cur_res->ai_next) {
+    addr = (struct sockaddr_in *)cur_res->ai_addr;
+    
+    LOGDEBUG(INFO_CLIENT_CONNECTING_IP, host, port, inet_ntoa(addr->sin_addr));
+    addr->sin_port = htons(port);
+    
+    sockfd = socket(cur_res->ai_family, cur_res->ai_socktype, 0);
+    if (sockfd < 0) {
+      if (cur_res->ai_next == NULL) {  // nothing more to try; error out
+        LOG(LOG_ERR, "Could not get socket: %s.  Nothing more to try.", strerror(errno));
+        freeaddrinfo(results);
+        return 0;
+      }
+      else {
+        LOGDEBUG("Could not get socket: %s.  Trying next address.", strerror(errno));
+        continue;
+      }
+    }
+    
+    if (connect(sockfd, cur_res->ai_addr, cur_res->ai_addrlen)<0) {  // connect failed
+      if (cur_res->ai_next == NULL) {  // nothing more to try; error out
+        LOG(LOG_ERR, ERR_CLIENT_CONNECT_HOST_FAILED, host, port, inet_ntoa(addr->sin_addr), strerror(errno));
+        close(sockfd);
+        freeaddrinfo(results);
+        return 0;
+      }
+      else { // more options yet to try
+        LOGDEBUG(INFO_CLIENT_CONNECT_HOST_FAILED, host, port, inet_ntoa(addr->sin_addr), strerror(errno));
+        close(sockfd);
+        continue;
+      }
+    }
+    else {  // connect succeeded!
+      break;
+    }
+  }
+  
+  LOGDEBUG(INFO_CLIENT_CONNECTED);
 
   setsockopt(sockfd,SOL_SOCKET,TCP_NODELAY,&yes,sizeof(int));
 
@@ -3917,6 +3963,7 @@ int has_virus(buffer *message) {
   if (sock == NULL) {
     LOG(LOG_ERR, ERR_CLIENT_CONNECT_HOST, host, port, strerror(errno));
     close(sockfd);
+    freeaddrinfo(results);
     return 0;
   }
   sockout = fdopen(sockfd, "w");
@@ -3924,6 +3971,7 @@ int has_virus(buffer *message) {
     LOG(LOG_ERR, ERR_CLIENT_CONNECT_HOST, host, port, strerror(errno));
     fclose(sock);
     close(sockfd);
+    freeaddrinfo(results);
     return 0;
   }
   fprintf(sockout, "STREAM\r\n");
@@ -3931,7 +3979,8 @@ int has_virus(buffer *message) {
 
   if ((fgets(buf, sizeof(buf), sock))!=NULL && !strncmp(buf, "PORT", 4)) {
     int s_port = atoi(buf+5);
-    if (feed_clam(s_port, message)==0) {
+    addr->sin_port = htons(s_port);
+    if (feed_clam(cur_res, message)==0) {
       if ((fgets(buf, sizeof(buf), sock))!=NULL) {
         if (!strstr(buf, ": OK"))
           virus = 1;
@@ -3941,44 +3990,43 @@ int has_virus(buffer *message) {
   fclose(sock);
   fclose(sockout);
   close(sockfd);
+  freeaddrinfo(results);
 
   return virus;
 }
 
 /*
- * feed_clam(int port, buffer *message)
+ * feed_clam(struct addrinfo *addrinfo, buffer *message)
  *
  * DESCRIPTION
  *   Feed a stream to ClamAV for virus detection
  *
  * INPUT ARGUMENTS
- *    sockfd      port number of stream
+ *    addrinfo    pointer to a addrinfo struct for connection to ClamAV transmission stream
  *    message     pointer to buffer containing message for scanning
  *
  * RETURN VALUES
  *   returns 0 on success
  */
 
-int feed_clam(int port, buffer *message) {
-  struct sockaddr_in addr;
-  int sockfd, r, addr_len;
+int feed_clam(struct addrinfo *addrinfo, buffer *message) {
+  struct sockaddr_in *addr = (struct sockaddr_in *)addrinfo->ai_addr;
+  int sockfd, r;
+  int port = ntohs(addr->sin_port);
   int yes = 1;
   long sent = 0;
   long size = strlen(message->data);
   char *host = _ds_read_attribute(agent_config, "ClamAVHost");
+  
+  LOGDEBUG("Connecting to %s:%d (IP %s) for virus stream transmission", host, port, inet_ntoa(addr->sin_addr));
 
-  sockfd = socket(AF_INET, SOCK_STREAM, 0);
+  sockfd = socket(addrinfo->ai_family, addrinfo->ai_socktype, 0);
   if (sockfd < 0) {
-    LOG(LOG_ERR, "socket(AF_INET, SOCK_STREAM, 0): %s", strerror(errno));
+    LOG(LOG_ERR, "Could not get socket: %s", strerror(errno));
     return EFAILURE;
   }
-  memset(&addr, 0, sizeof(struct sockaddr_in));
-  addr.sin_family = AF_INET;
-  addr.sin_addr.s_addr = inet_addr(host);
-  addr.sin_port = htons(port);
-  addr_len = sizeof(struct sockaddr_in);
-  LOGDEBUG("Connecting to %s:%d for virus stream transmission", host, port);
-  if(connect(sockfd, (struct sockaddr *)&addr, addr_len)<0) {
+  
+  if(connect(sockfd, addrinfo->ai_addr, addrinfo->ai_addrlen)<0) {
     LOG(LOG_ERR, ERR_CLIENT_CONNECT_HOST, host, port, strerror(errno));
     close(sockfd);
     return EFAILURE;

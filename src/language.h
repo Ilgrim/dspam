@@ -144,14 +144,19 @@ user, e.g.. root or Trusted User [uid=%d(%s)]"
 
 #define INFO_CLIENT_CONNECTED           "Connection established"
 #define INFO_CLIENT_CONNECTING          "Establishing connection to %s:%d"
+#define INFO_CLIENT_CONNECTING_IP       "Establishing connection to %s:%d (trying IP: %s)"
+#define INFO_CLIENT_DNS_LOOKUP          "Looking up IP from hostname for %s"
+#define INFO_CLIENT_CONNECT_HOST_FAILED "Connection to %s:%d (IP: %s) failed: %s.  Trying next address."
 
 /* Client-mode related error codes */
 
 #define ERR_CLIENT_INVALID_CONFIG	"Invalid client configuration"
 #define ERR_CLIENT_CONNECT		"Unable to connect to server"
+#define ERR_CLIENT_DNS_LOOKUP           "Unable to look up IP from hostname for %s: %s"
 #define ERR_CLIENT_IDENT		"No ClientIdent provided in dspam.conf"
 #define ERR_CLIENT_CONNECT_SOCKET	"Connection to socket %s failed: %s"
 #define ERR_CLIENT_CONNECT_HOST	        "Connection to %s:%d failed: %s"
+#define ERR_CLIENT_CONNECT_HOST_FAILED  "Connection to %s:%d (IP: %s) failed: %s.  No more addresses to try."
 #define ERR_CLIENT_AUTH_FAILED	        "Unable to authenticate client"
 #define ERR_CLIENT_AUTHENTICATE	        "Authentication rejected"
 #define ERR_CLIENT_WHILE_AUTH		"Error while authenticating: %s"

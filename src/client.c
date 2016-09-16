@@ -300,9 +300,11 @@ BAIL:
  */
 
 int client_connect(AGENT_CTX *ATX, int flags) {
-  struct sockaddr_in addr;
+  struct addrinfo hints;
+  struct addrinfo *results, *cur_res;
+  struct sockaddr_in *addr;
   struct sockaddr_un saun;
-  int sockfd;
+  int sockfd, ret;
   int yes = 1;
   int port = 24;
   int domain = 0;
@@ -368,18 +370,61 @@ int client_connect(AGENT_CTX *ATX, int flags) {
   /* Connect (TCP socket) */
 
   } else {
-    sockfd = socket(AF_INET, SOCK_STREAM, 0);
-    memset(&addr, 0, sizeof(struct sockaddr_in));
-    addr.sin_family = AF_INET;
-    addr.sin_addr.s_addr = inet_addr(host);
-    addr.sin_port = htons(port);
-    addr_len = sizeof(struct sockaddr_in);
+    memset(&hints, 0, sizeof(struct addrinfo));
+    hints.ai_family = AF_INET;  // Use AF_UNSPEC if we eventually want to allow IPv6
+    hints.ai_socktype = SOCK_STREAM;
+    hints.ai_flags = 0;
+    hints.ai_protocol = 0;
+    
     LOGDEBUG(INFO_CLIENT_CONNECTING, host, port);
-    if(connect(sockfd, (struct sockaddr *)&addr, addr_len)<0) {
-      LOG(LOG_ERR, ERR_CLIENT_CONNECT_HOST, host, port, strerror(errno));
-      STATUS("%s", strerror(errno));
-      close(sockfd);
+    
+    LOGDEBUG(INFO_CLIENT_DNS_LOOKUP, host);
+    ret = getaddrinfo(host, NULL, &hints, &results);
+    if (ret != 0) {
+      LOG(LOG_ERR, ERR_CLIENT_DNS_LOOKUP, host, gai_strerror(ret));
+      STATUS("%s", gai_strerror(ret));
       return EFAILURE;
+    }
+    
+    // results is a linked list of addrinfo structs containing (hopefully)
+    // IP address(es) return from DNS lookup.  We try connecting to each
+    // and if they all fail, we error out.
+    for (cur_res = results; cur_res != NULL; cur_res = cur_res->ai_next) {
+      addr = (struct sockaddr_in *)cur_res->ai_addr;
+      LOGDEBUG(INFO_CLIENT_CONNECTING_IP, host, port, inet_ntoa(addr->sin_addr));
+      addr->sin_port = htons(port);
+      
+      sockfd = socket(cur_res->ai_family, cur_res->ai_socktype, 0);
+      if (sockfd < 0) {
+        if (cur_res->ai_next == NULL) {  // nothing more to try; error out
+          LOG(LOG_ERR, "Could not get socket: %s.  Nothing more to try.", strerror(errno));
+          freeaddrinfo(results);
+          return 0;
+        }
+        else {
+          LOGDEBUG("Could not get socket: %s.  Trying next address.", strerror(errno));
+          continue;
+        }
+      }
+      
+      if (connect(sockfd, cur_res->ai_addr, cur_res->ai_addrlen)<0) {  // connect failed
+        if (cur_res->ai_next == NULL) {  // nothing more to try; error out
+          LOG(LOG_ERR, ERR_CLIENT_CONNECT_HOST_FAILED, host, port, inet_ntoa(addr->sin_addr), strerror(errno));
+          STATUS("%s", strerror(errno));
+          close(sockfd);
+          freeaddrinfo(results);
+          return EFAILURE;
+        }
+        else { // more options yet to try
+          LOGDEBUG(INFO_CLIENT_CONNECT_HOST_FAILED, host, port, inet_ntoa(addr->sin_addr), strerror(errno));
+          close(sockfd);
+          continue;
+        }
+      }
+      else {  // connect succeeded!
+        freeaddrinfo(results);
+        break;
+      }
     }
   }
 

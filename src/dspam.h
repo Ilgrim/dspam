@@ -20,6 +20,7 @@
 */
 
 #include <sys/types.h>
+#include <netdb.h>
 #ifndef _WIN32
 #include <pwd.h>
 #endif
@@ -65,7 +66,7 @@ int embed_signed       (DSPAM_CTX *CTX, AGENT_CTX *ATX);
 int tracksource        (DSPAM_CTX *CTX);
 #ifdef CLAMAV
 int has_virus          (buffer *message);
-int feed_clam          (int port, buffer *message);
+int feed_clam          (struct addrinfo *addrinfo, buffer *message);
 #endif
 int is_blacklisted     (DSPAM_CTX *CTX, AGENT_CTX *ATX);
 int is_blocklisted     (DSPAM_CTX *CTX, AGENT_CTX *ATX);
